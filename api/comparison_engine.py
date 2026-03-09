@@ -6,6 +6,7 @@ import re
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -856,4 +857,210 @@ def compare_and_report(master_path, delivery_path, output_path, allowlist=None):
         'report_path': report_path,
         'summary_text': summary_text,
         'stats': stats,
+    }, None
+
+
+# ── Multi-delivery report ────────────────────────────────────────────────────
+
+def _safe_tab_name(filename_stem, suffix, max_stem=28):
+    """Build an Excel tab name within the 31-char limit."""
+    stem = filename_stem[:max_stem]
+    return f"{stem} {suffix}"
+
+
+def generate_combined_report(results_list, output_path):
+    """Generate a single Excel report for multiple delivery sheets.
+
+    results_list: list of (delivery_filename, run_comparison result dict)
+    """
+    wb = openpyxl.Workbook()
+
+    # ── Aggregate Summary tab ───────────────────────────────────────────
+    ws_agg = wb.active
+    ws_agg.title = 'Aggregate Summary'
+
+    agg_headers = ['Delivery Sheet', 'Raw Entries', 'Compared', 'Found', 'Not Found', 'Match Rate', 'Revisions', 'Anomalies']
+    for col, h in enumerate(agg_headers, 1):
+        ws_agg.cell(row=1, column=col, value=h)
+    style_header_row(ws_agg, 1, len(agg_headers))
+
+    totals = {'raw': 0, 'compared': 0, 'found': 0, 'not_found': 0, 'revision': 0, 'anomalies': 0}
+
+    for data_row_idx, (delivery_filename, result) in enumerate(results_list, 1):
+        stats = result['stats']
+        row = data_row_idx + 1
+        rate = stats['match_rate']
+
+        style_body_cell(ws_agg, row, 1).value = delivery_filename
+        style_body_cell(ws_agg, row, 2).value = stats['raw_row_count']
+        style_body_cell(ws_agg, row, 3).value = stats['unique_files_for_comparison']
+        style_body_cell(ws_agg, row, 4).value = stats['found']
+        nf_cell = style_body_cell(ws_agg, row, 5)
+        nf_cell.value = stats['not_found']
+        if stats['not_found'] > 0:
+            nf_cell.fill = RED_FILL
+
+        rate_cell = style_body_cell(ws_agg, row, 6)
+        rate_cell.value = f"{rate:.1f}%"
+        if rate >= 99:
+            rate_cell.fill = GREEN_FILL
+        elif rate >= 95:
+            rate_cell.fill = YELLOW_FILL
+        else:
+            rate_cell.fill = RED_FILL
+
+        rev_cell = style_body_cell(ws_agg, row, 7)
+        rev_cell.value = stats['revision_match']
+        if stats['revision_match'] > 0:
+            rev_cell.fill = YELLOW_FILL
+
+        anom_cell = style_body_cell(ws_agg, row, 8)
+        anom_cell.value = stats['flagged']
+        if stats['flagged'] > 0:
+            anom_cell.fill = YELLOW_FILL
+
+        totals['raw'] += stats['raw_row_count']
+        totals['compared'] += stats['unique_files_for_comparison']
+        totals['found'] += stats['found']
+        totals['not_found'] += stats['not_found']
+        totals['revision'] += stats['revision_match']
+        totals['anomalies'] += stats['flagged']
+
+    # Totals row
+    totals_row = len(results_list) + 2
+    total_compared = totals['compared']
+    avg_rate = (totals['found'] / total_compared * 100) if total_compared > 0 else 0
+    totals_data = ['TOTAL', totals['raw'], totals['compared'], totals['found'], totals['not_found'],
+                   f"{avg_rate:.1f}%", totals['revision'], totals['anomalies']]
+    for col, val in enumerate(totals_data, 1):
+        cell = ws_agg.cell(row=totals_row, column=col, value=val)
+        cell.font = BOLD_FONT
+        cell.border = THIN_BORDER
+        cell.alignment = Alignment(vertical='top')
+
+    ws_agg.freeze_panes = 'A2'
+    agg_col_widths = [45, 14, 14, 10, 14, 14, 14, 14]
+    for col, width in enumerate(agg_col_widths, 1):
+        ws_agg.column_dimensions[get_column_letter(col)].width = width
+
+    # ── Per-delivery tabs ───────────────────────────────────────────────
+    missing_headers = ['#', 'Original Filename(s)', 'Cleaned Filename', 'Status', 'Closest Match in Master', 'Package (if found)', 'Flags']
+    detail_headers = ['Original Filename(s)', 'Cleaned Filename', 'Matched Master Entry', 'Status', 'Found In Package', 'Flags & Notes']
+
+    status_order = {'NOT FOUND': 0, 'FOUND — WRONG PACKAGE': 1, 'POSSIBLE MATCH — REVISION': 2}
+    all_status_order = {'NOT FOUND': 0, 'FOUND — WRONG PACKAGE': 1, 'POSSIBLE MATCH — REVISION': 2, 'FOUND': 3}
+
+    for delivery_filename, result in results_list:
+        entries = result['file_entries']
+        stem = Path(delivery_filename).stem
+
+        # Missing Files tab
+        ws_m = wb.create_sheet(_safe_tab_name(stem, '— Missing'))
+        for col, h in enumerate(missing_headers, 1):
+            ws_m.cell(row=1, column=col, value=h)
+        style_header_row(ws_m, 1, len(missing_headers))
+
+        missing = [e for e in entries if e.status != 'FOUND']
+        missing.sort(key=lambda e: status_order.get(e.status, 99))
+
+        if not missing:
+            ws_m.cell(row=2, column=1, value='No missing files — all deliveries matched!').font = Font(bold=True, color='006100', name='Arial', size=11)
+        else:
+            for idx, entry in enumerate(missing, 1):
+                row = idx + 1
+                style_body_cell(ws_m, row, 1).value = idx
+                style_body_cell(ws_m, row, 2).value = ', '.join(entry.original_filenames)
+                style_body_cell(ws_m, row, 3).value = entry.cleaned_name
+                status_cell = style_body_cell(ws_m, row, 4)
+                status_cell.value = entry.status
+                if entry.status == 'NOT FOUND':
+                    status_cell.fill = RED_FILL
+                elif entry.status == 'FOUND — WRONG PACKAGE':
+                    status_cell.fill = ORANGE_FILL
+                elif entry.status == 'POSSIBLE MATCH — REVISION':
+                    status_cell.fill = YELLOW_FILL
+                style_body_cell(ws_m, row, 5).value = entry.matched_master_entry or ''
+                style_body_cell(ws_m, row, 6).value = entry.found_in_package or ''
+                style_body_cell(ws_m, row, 7).value = '; '.join(entry.flags) if entry.flags else ''
+
+        ws_m.freeze_panes = 'A2'
+        for col, width in enumerate([5, 45, 40, 28, 40, 30, 45], 1):
+            ws_m.column_dimensions[get_column_letter(col)].width = width
+
+        # Full Detail tab
+        ws_d = wb.create_sheet(_safe_tab_name(stem, '— Detail'))
+        for col, h in enumerate(detail_headers, 1):
+            ws_d.cell(row=1, column=col, value=h)
+        style_header_row(ws_d, 1, len(detail_headers))
+
+        sorted_entries = sorted(entries, key=lambda e: all_status_order.get(e.status, 99))
+        for idx, entry in enumerate(sorted_entries, 1):
+            row = idx + 1
+            style_body_cell(ws_d, row, 1).value = ', '.join(entry.original_filenames)
+            style_body_cell(ws_d, row, 2).value = entry.cleaned_name
+            style_body_cell(ws_d, row, 3).value = entry.matched_master_entry or ''
+            status_cell = style_body_cell(ws_d, row, 4)
+            status_cell.value = entry.status
+            if entry.status == 'FOUND':
+                status_cell.fill = GREEN_FILL
+            elif entry.status == 'NOT FOUND':
+                status_cell.fill = RED_FILL
+            elif entry.status == 'FOUND — WRONG PACKAGE':
+                status_cell.fill = ORANGE_FILL
+            elif entry.status == 'POSSIBLE MATCH — REVISION':
+                status_cell.fill = YELLOW_FILL
+            if entry.matched_master_entry and entry.cleaned_name.lower() != entry.matched_master_entry.lower():
+                ws_d.cell(row=row, column=2).fill = LIGHT_YELLOW_FILL
+                ws_d.cell(row=row, column=3).fill = LIGHT_YELLOW_FILL
+            style_body_cell(ws_d, row, 5).value = entry.found_in_package or ''
+            style_body_cell(ws_d, row, 6).value = '; '.join(entry.flags) if entry.flags else ''
+
+        ws_d.freeze_panes = 'A2'
+        for col, width in enumerate([45, 40, 40, 28, 30, 45], 1):
+            ws_d.column_dimensions[get_column_letter(col)].width = width
+
+    wb.save(output_path)
+    return output_path
+
+
+def compare_and_report_multiple(master_path, delivery_paths, output_path, allowlist=None):
+    """Full pipeline for multiple delivery sheets: parse, compare each, generate combined report."""
+    results_list = []
+
+    for delivery_path in delivery_paths:
+        result, error = run_comparison(master_path, delivery_path, allowlist)
+        if error:
+            return None, f"Error processing {delivery_path}: {error}"
+        delivery_filename = Path(delivery_path).name
+        results_list.append((delivery_filename, result))
+
+    report_path = generate_combined_report(results_list, output_path)
+
+    # Build combined summary text
+    lines = ['MULTI-DELIVERY COMPARISON SUMMARY', '=' * 50, '']
+    total_compared = 0
+    total_found = 0
+
+    for delivery_filename, result in results_list:
+        stats = result['stats']
+        total_compared += stats['unique_files_for_comparison']
+        total_found += stats['found']
+        lines.append(f"── {delivery_filename}")
+        lines.append(f"   Raw: {stats['raw_row_count']}  Compared: {stats['unique_files_for_comparison']}  Found: {stats['found']}  Not Found: {stats['not_found']}  Match Rate: {stats['match_rate']:.1f}%")
+        if stats['not_found'] > 0:
+            not_found = [e for e in result['file_entries'] if e.status == 'NOT FOUND']
+            for e in not_found:
+                lines.append(f"   • NOT FOUND: {e.cleaned_name}")
+        lines.append('')
+
+    overall_rate = (total_found / total_compared * 100) if total_compared > 0 else 0
+    lines.append(f"OVERALL: {total_found}/{total_compared} files matched ({overall_rate:.1f}%)")
+
+    summary_text = '\n'.join(lines)
+    stats_list = [{'delivery': fn, 'stats': r['stats']} for fn, r in results_list]
+
+    return {
+        'report_path': report_path,
+        'summary_text': summary_text,
+        'stats_list': stats_list,
     }, None

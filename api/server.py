@@ -3,10 +3,11 @@ import os
 import uuid
 import shutil
 from pathlib import Path
+from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from comparison_engine import compare_and_report, DEFAULT_ALLOWLIST
+from comparison_engine import compare_and_report, compare_and_report_multiple, DEFAULT_ALLOWLIST
 
 app = FastAPI(title="Leveransplan Comparison API", version="1.0.0")
 
@@ -33,55 +34,82 @@ async def health():
 @app.post("/api/compare")
 async def compare(
     master_file: UploadFile = File(...),
-    delivery_file: UploadFile = File(...),
+    delivery_files: List[UploadFile] = File(...),
     allowlist: str = Form(default=""),
 ):
-    """Upload master + delivery files and run comparison."""
+    """Upload master + one or more delivery files and run comparison."""
     job_id = str(uuid.uuid4())[:8]
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(exist_ok=True)
-    
+
     try:
-        # Save uploaded files
+        # Save master file
         master_path = job_dir / f"master_{master_file.filename}"
-        delivery_path = job_dir / f"delivery_{delivery_file.filename}"
-        
         with open(master_path, "wb") as f:
             shutil.copyfileobj(master_file.file, f)
-        with open(delivery_path, "wb") as f:
-            shutil.copyfileobj(delivery_file.file, f)
-        
+
+        # Save all delivery files
+        delivery_paths = []
+        for df in delivery_files:
+            dp = job_dir / f"delivery_{df.filename}"
+            with open(dp, "wb") as f:
+                shutil.copyfileobj(df.file, f)
+            delivery_paths.append(str(dp))
+
         # Parse allowlist
         if allowlist.strip():
             ext_list = {ext.strip().lower() for ext in allowlist.split(",") if ext.strip()}
             ext_set = {ext if ext.startswith('.') else f'.{ext}' for ext in ext_list}
         else:
             ext_set = DEFAULT_ALLOWLIST
-        
-        # Generate report filename
-        delivery_stem = Path(delivery_file.filename).stem
-        report_filename = f"{delivery_stem}_vs_Master_ComparisonReport.xlsx"
-        report_path = REPORT_DIR / f"{job_id}_{report_filename}"
-        
-        # Run comparison
-        result, error = compare_and_report(
-            master_path=str(master_path),
-            delivery_path=str(delivery_path),
-            output_path=str(report_path),
-            allowlist=ext_set,
-        )
-        
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-        
-        return JSONResponse({
-            "job_id": job_id,
-            "report_filename": report_filename,
-            "download_url": f"/api/download/{job_id}/{report_filename}",
-            "summary": result["summary_text"],
-            "stats": result["stats"],
-        })
-    
+
+        if len(delivery_paths) == 1:
+            # Single delivery — existing flow, same report format
+            delivery_stem = Path(delivery_files[0].filename).stem
+            report_filename = f"{delivery_stem}_vs_Master_ComparisonReport.xlsx"
+            report_path = REPORT_DIR / f"{job_id}_{report_filename}"
+
+            result, error = compare_and_report(
+                master_path=str(master_path),
+                delivery_path=delivery_paths[0],
+                output_path=str(report_path),
+                allowlist=ext_set,
+            )
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+
+            return JSONResponse({
+                "job_id": job_id,
+                "report_filename": report_filename,
+                "download_url": f"/api/download/{job_id}/{report_filename}",
+                "summary": result["summary_text"],
+                "stats": result["stats"],
+                "multi": False,
+            })
+
+        else:
+            # Multiple deliveries — combined report
+            report_filename = "Multi_Delivery_vs_Master_ComparisonReport.xlsx"
+            report_path = REPORT_DIR / f"{job_id}_{report_filename}"
+
+            result, error = compare_and_report_multiple(
+                master_path=str(master_path),
+                delivery_paths=delivery_paths,
+                output_path=str(report_path),
+                allowlist=ext_set,
+            )
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+
+            return JSONResponse({
+                "job_id": job_id,
+                "report_filename": report_filename,
+                "download_url": f"/api/download/{job_id}/{report_filename}",
+                "summary": result["summary_text"],
+                "stats": result["stats_list"],
+                "multi": True,
+            })
+
     except HTTPException:
         raise
     except Exception as e:

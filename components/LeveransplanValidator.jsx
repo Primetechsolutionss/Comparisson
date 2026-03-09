@@ -6,16 +6,23 @@ const API_BASE = typeof window !== 'undefined' && window.location.hostname === '
 
 const DEFAULT_ALLOWLIST = ['.pdf', '.docx', '.xlsx', '.dwg', '.dgn', '.ifc', '.zip', '.rvt', '.jpg', '.xls', '.doc', '.pptx'];
 
-function FileDropZone({ label, description, file, onFile, accept, icon }) {
+function FileDropZone({ label, description, file, files, onFile, onFiles, accept, icon, multiple }) {
   const inputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
+
+  const hasContent = multiple ? (files && files.length > 0) : !!file;
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     setDragOver(false);
-    const f = e.dataTransfer.files[0];
-    if (f) onFile(f);
-  }, [onFile]);
+    if (multiple) {
+      const dropped = Array.from(e.dataTransfer.files);
+      if (dropped.length > 0) onFiles(dropped);
+    } else {
+      const f = e.dataTransfer.files[0];
+      if (f) onFile(f);
+    }
+  }, [onFile, onFiles, multiple]);
 
   return (
     <div
@@ -26,7 +33,7 @@ function FileDropZone({ label, description, file, onFile, accept, icon }) {
       style={{
         flex: 1,
         minHeight: 200,
-        border: `2px dashed ${dragOver ? '#3B82F6' : file ? '#22C55E' : '#334155'}`,
+        border: `2px dashed ${dragOver ? '#3B82F6' : hasContent ? '#22C55E' : '#334155'}`,
         borderRadius: 16,
         padding: 32,
         display: 'flex',
@@ -35,7 +42,7 @@ function FileDropZone({ label, description, file, onFile, accept, icon }) {
         justifyContent: 'center',
         gap: 12,
         cursor: 'pointer',
-        background: dragOver ? 'rgba(59,130,246,0.06)' : file ? 'rgba(34,197,94,0.04)' : 'rgba(15,23,42,0.3)',
+        background: dragOver ? 'rgba(59,130,246,0.06)' : hasContent ? 'rgba(34,197,94,0.04)' : 'rgba(15,23,42,0.3)',
         transition: 'all 0.2s ease',
         position: 'relative',
         overflow: 'hidden',
@@ -45,26 +52,43 @@ function FileDropZone({ label, description, file, onFile, accept, icon }) {
         ref={inputRef}
         type="file"
         accept={accept}
-        onChange={(e) => e.target.files[0] && onFile(e.target.files[0])}
+        multiple={!!multiple}
+        onChange={(e) => {
+          if (multiple) {
+            const picked = Array.from(e.target.files);
+            if (picked.length > 0) onFiles(picked);
+          } else {
+            if (e.target.files[0]) onFile(e.target.files[0]);
+          }
+        }}
         style={{ display: 'none' }}
       />
       <div style={{ fontSize: 40, opacity: 0.8 }}>{icon}</div>
       <div style={{ fontSize: 15, fontWeight: 600, color: '#E2E8F0', letterSpacing: '0.02em' }}>{label}</div>
       <div style={{ fontSize: 13, color: '#94A3B8', textAlign: 'center', maxWidth: 240, lineHeight: 1.5 }}>{description}</div>
-      {file && (
+      {!multiple && file && (
         <div style={{
-          marginTop: 8,
-          padding: '8px 16px',
-          background: 'rgba(34,197,94,0.12)',
-          borderRadius: 8,
-          fontSize: 13,
-          color: '#22C55E',
-          fontWeight: 500,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
+          marginTop: 8, padding: '8px 16px',
+          background: 'rgba(34,197,94,0.12)', borderRadius: 8,
+          fontSize: 13, color: '#22C55E', fontWeight: 500,
+          display: 'flex', alignItems: 'center', gap: 6,
         }}>
           <span>✓</span> {file.name}
+        </div>
+      )}
+      {multiple && files && files.length > 0 && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4, width: '100%', maxWidth: 300 }}>
+          {files.map((f, i) => (
+            <div key={i} style={{
+              padding: '6px 12px',
+              background: 'rgba(34,197,94,0.12)', borderRadius: 6,
+              fontSize: 12, color: '#22C55E', fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: 6,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              <span>✓</span> {f.name}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -161,14 +185,14 @@ function AllowlistEditor({ allowlist, onChange }) {
 
 export default function App() {
   const [masterFile, setMasterFile] = useState(null);
-  const [deliveryFile, setDeliveryFile] = useState(null);
+  const [deliveryFiles, setDeliveryFiles] = useState([]);
   const [allowlist, setAllowlist] = useState([...DEFAULT_ALLOWLIST]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState('');
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
 
-  const canCompare = masterFile && deliveryFile && !loading;
+  const canCompare = masterFile && deliveryFiles.length > 0 && !loading;
 
   const runComparison = async () => {
     setLoading(true);
@@ -179,7 +203,7 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('master_file', masterFile);
-      formData.append('delivery_file', deliveryFile);
+      deliveryFiles.forEach(f => formData.append('delivery_files', f));
       formData.append('allowlist', allowlist.join(','));
 
       setProgress('Running comparison engine...');
@@ -208,7 +232,7 @@ export default function App() {
 
   const reset = () => {
     setMasterFile(null);
-    setDeliveryFile(null);
+    setDeliveryFiles([]);
     setResult(null);
     setError('');
     setProgress('');
@@ -277,12 +301,13 @@ export default function App() {
                 icon="📋"
               />
               <FileDropZone
-                label="Delivery Sheet"
-                description="The incoming delivery package to check against the master"
-                file={deliveryFile}
-                onFile={setDeliveryFile}
+                label="Delivery Sheet(s)"
+                description="One or more delivery packages to check against the master"
+                files={deliveryFiles}
+                onFiles={setDeliveryFiles}
                 accept=".xlsx,.xls"
                 icon="📦"
+                multiple
               />
             </div>
 
@@ -341,7 +366,9 @@ export default function App() {
               <div>
                 <h2 style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.02em', margin: 0 }}>Comparison Results</h2>
                 <p style={{ color: '#64748B', fontSize: 13, marginTop: 4 }}>
-                  {deliveryFile?.name} vs Master Leveransplan
+                  {result?.multi
+                    ? `${result.stats.length} delivery sheets vs Master Leveransplan`
+                    : `${deliveryFiles[0]?.name} vs Master Leveransplan`}
                 </p>
               </div>
               <button onClick={reset} style={{
@@ -352,16 +379,50 @@ export default function App() {
               </button>
             </div>
 
-            {/* Stats grid */}
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 32 }}>
-              <StatCard label="Match Rate" value={`${result.stats.match_rate.toFixed(1)}%`} color={matchRateColor} />
-              <StatCard label="Raw Entries" value={result.stats.raw_row_count} sub="Delivery sheet rows" />
-              <StatCard label="Compared" value={result.stats.unique_files_for_comparison} sub="After filtering" />
-              <StatCard label="Found" value={result.stats.found} color="#22C55E" />
-              <StatCard label="Not Found" value={result.stats.not_found} color={result.stats.not_found > 0 ? '#EF4444' : '#22C55E'} />
-              <StatCard label="Revision Match" value={result.stats.revision_match} color={result.stats.revision_match > 0 ? '#EAB308' : '#94A3B8'} />
-              <StatCard label="Anomalies" value={result.stats.flagged} color={result.stats.flagged > 0 ? '#EAB308' : '#94A3B8'} />
-            </div>
+            {/* Stats grid — single delivery */}
+            {!result.multi && (
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 32 }}>
+                <StatCard label="Match Rate" value={`${result.stats.match_rate.toFixed(1)}%`} color={matchRateColor} />
+                <StatCard label="Raw Entries" value={result.stats.raw_row_count} sub="Delivery sheet rows" />
+                <StatCard label="Compared" value={result.stats.unique_files_for_comparison} sub="After filtering" />
+                <StatCard label="Found" value={result.stats.found} color="#22C55E" />
+                <StatCard label="Not Found" value={result.stats.not_found} color={result.stats.not_found > 0 ? '#EF4444' : '#22C55E'} />
+                <StatCard label="Revision Match" value={result.stats.revision_match} color={result.stats.revision_match > 0 ? '#EAB308' : '#94A3B8'} />
+                <StatCard label="Anomalies" value={result.stats.flagged} color={result.stats.flagged > 0 ? '#EAB308' : '#94A3B8'} />
+              </div>
+            )}
+
+            {/* Stats table — multiple deliveries */}
+            {result.multi && (
+              <div style={{ marginBottom: 32, overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: '#1B2A4A' }}>
+                      {['Delivery Sheet', 'Compared', 'Found', 'Not Found', 'Match Rate', 'Revisions', 'Anomalies'].map(h => (
+                        <th key={h} style={{ padding: '10px 14px', textAlign: 'left', color: '#fff', fontWeight: 600, whiteSpace: 'nowrap', border: '1px solid #334155' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.stats.map((row, i) => {
+                      const s = row.stats;
+                      const rateColor = s.match_rate >= 99 ? '#22C55E' : s.match_rate >= 95 ? '#EAB308' : '#EF4444';
+                      return (
+                        <tr key={i} style={{ background: i % 2 === 0 ? 'rgba(15,23,42,0.4)' : 'rgba(15,23,42,0.2)' }}>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: '#E2E8F0', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.delivery}</td>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: '#94A3B8' }}>{s.unique_files_for_comparison}</td>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: '#22C55E' }}>{s.found}</td>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: s.not_found > 0 ? '#EF4444' : '#22C55E' }}>{s.not_found}</td>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: rateColor, fontWeight: 700 }}>{s.match_rate.toFixed(1)}%</td>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: s.revision_match > 0 ? '#EAB308' : '#94A3B8' }}>{s.revision_match}</td>
+                          <td style={{ padding: '9px 14px', border: '1px solid #1E293B', color: s.flagged > 0 ? '#EAB308' : '#94A3B8' }}>{s.flagged}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {/* Download button */}
             <a
