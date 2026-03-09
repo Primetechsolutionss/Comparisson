@@ -355,7 +355,8 @@ export default function App() {
             {/* Stats grid */}
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 32 }}>
               <StatCard label="Match Rate" value={`${result.stats.match_rate.toFixed(1)}%`} color={matchRateColor} />
-              <StatCard label="Total Files" value={result.stats.total_unique} />
+              <StatCard label="Raw Entries" value={result.stats.raw_row_count} sub="Delivery sheet rows" />
+              <StatCard label="Compared" value={result.stats.unique_files_for_comparison} sub="After filtering" />
               <StatCard label="Found" value={result.stats.found} color="#22C55E" />
               <StatCard label="Not Found" value={result.stats.not_found} color={result.stats.not_found > 0 ? '#EF4444' : '#22C55E'} />
               <StatCard label="Revision Match" value={result.stats.revision_match} color={result.stats.revision_match > 0 ? '#EAB308' : '#94A3B8'} />

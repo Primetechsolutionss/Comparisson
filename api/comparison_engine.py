@@ -258,7 +258,7 @@ def parse_delivery_sheet(filepath, allowlist=None):
             break
     
     raw_entries = []  # (row_number, original_filename)
-    
+
     for row_idx in range(header_row + 1, ws.max_row + 1):
         val = ws.cell(row=row_idx, column=2).value
         if not val:
@@ -272,25 +272,32 @@ def parse_delivery_sheet(filepath, allowlist=None):
             title_val = ws.cell(row=row_idx, column=3).value
             if title_val and 'MEP' in str(title_val).upper():
                 continue
-        
+
         raw_entries.append((row_idx, original))
-    
+
+    raw_row_count = len(raw_entries)
+
     # Apply allowlist filter
     filtered_entries = []
     excluded = []
+    excluded_by_ext = defaultdict(int)
     for row_num, original in raw_entries:
         ext = get_extension(original)
         if ext and ext not in allowlist:
             excluded.append((row_num, original, ext))
+            excluded_by_ext[ext] += 1
             continue
         filtered_entries.append((row_num, original))
-    
+
     # Clean and deduplicate (collapse multi-format groups)
     groups = defaultdict(list)  # cleaned_name -> [(row_num, original)]
     for row_num, original in filtered_entries:
         cleaned = strip_extension(original)
         cleaned = clean_text(cleaned)
         groups[cleaned].append((row_num, original))
+
+    multi_format_duplicates = len(filtered_entries) - len(groups)
+    unique_files_for_comparison = len(groups)
     
     # Build FileEntry objects
     file_entries = []
@@ -321,9 +328,17 @@ def parse_delivery_sheet(filepath, allowlist=None):
         
         file_entries.append(entry)
     
+    pipeline_stats = {
+        'raw_row_count': raw_row_count,
+        'excluded_by_allowlist': len(excluded),
+        'excluded_by_ext': dict(excluded_by_ext),
+        'multi_format_duplicates': multi_format_duplicates,
+        'unique_files_for_comparison': unique_files_for_comparison,
+    }
+
     wb.close()
-    
-    return file_entries, excluded, header_row, ws.title
+
+    return file_entries, excluded, header_row, ws.title, pipeline_stats
 
 
 # ── Comparison engine ────────────────────────────────────────────────────────
@@ -346,7 +361,7 @@ def run_comparison(master_path, delivery_path, allowlist=None):
     
     # Parse both files
     primary_entries, all_entries, sheet_info = parse_master_file(master_path)
-    file_entries, excluded, header_row, delivery_sheet_name = parse_delivery_sheet(delivery_path, allowlist)
+    file_entries, excluded, header_row, delivery_sheet_name, pipeline_stats = parse_delivery_sheet(delivery_path, allowlist)
     
     if not file_entries:
         return None, "No valid filenames found in delivery sheet Column B."
@@ -468,6 +483,12 @@ def run_comparison(master_path, delivery_path, allowlist=None):
         'master_primary_count': master_primary_count,
         'excluded_count': len(excluded),
         'excluded_files': excluded,
+        # Pipeline funnel counts
+        'raw_row_count': pipeline_stats['raw_row_count'],
+        'excluded_by_allowlist': pipeline_stats['excluded_by_allowlist'],
+        'excluded_by_ext': pipeline_stats['excluded_by_ext'],
+        'multi_format_duplicates': pipeline_stats['multi_format_duplicates'],
+        'unique_files_for_comparison': pipeline_stats['unique_files_for_comparison'],
     }
     
     return {
@@ -486,6 +507,9 @@ RED_FILL = PatternFill('solid', fgColor='FFC7CE')
 ORANGE_FILL = PatternFill('solid', fgColor='FFCC99')
 YELLOW_FILL = PatternFill('solid', fgColor='FFEB9C')
 LIGHT_YELLOW_FILL = PatternFill('solid', fgColor='FFFFCC')
+LIGHT_RED_FILL = PatternFill('solid', fgColor='FFE0E0')
+LIGHT_GREEN_FILL = PatternFill('solid', fgColor='E2F0D9')
+SECTION_FILL = PatternFill('solid', fgColor='2D3F5F')
 HEADER_FILL = PatternFill('solid', fgColor='1B2A4A')
 HEADER_FONT = Font(bold=True, color='FFFFFF', name='Arial', size=11)
 BODY_FONT = Font(name='Arial', size=10)
@@ -606,17 +630,110 @@ def generate_report(results, output_path):
     
     # ── TAB 3: Summary / Overview ───────────────────────────────────────
     ws_summary = wb.create_sheet('Summary')
-    
-    sum_headers = ['Metric', 'Delivery Sheet', 'Master File', 'Delta / Notes']
+
+    sum_headers = ['Metric', 'Count', 'Master File', 'Notes / Details']
     for col, h in enumerate(sum_headers, 1):
         ws_summary.cell(row=1, column=col, value=h)
     style_header_row(ws_summary, 1, len(sum_headers))
-    
-    delta = stats['total_unique'] - stats['master_primary_count']
+
+    # ── Section 1: Processing Pipeline ──────────────────────────────────
+
+    # Section header row
+    sec1_row = 2
+    ws_summary.cell(row=sec1_row, column=1, value='PROCESSING PIPELINE')
+    ws_summary.merge_cells(start_row=sec1_row, start_column=1, end_row=sec1_row, end_column=4)
+    sec1_cell = ws_summary.cell(row=sec1_row, column=1)
+    sec1_cell.fill = SECTION_FILL
+    sec1_cell.font = Font(bold=True, color='FFFFFF', name='Arial', size=10)
+    sec1_cell.alignment = Alignment(horizontal='left', vertical='center')
+    sec1_cell.border = THIN_BORDER
+
+    # Build excluded-by-extension detail string
+    exc_by_ext = stats.get('excluded_by_ext', {})
+    if exc_by_ext:
+        ext_detail = ', '.join(f"{ext}: {cnt}" for ext, cnt in sorted(exc_by_ext.items()))
+    else:
+        ext_detail = '—'
+
+    pipeline_rows = [
+        (
+            'Raw entries in Delivery Sheet',
+            stats['raw_row_count'],
+            '—',
+            'Total non-empty rows in Column B',
+            None,
+        ),
+        (
+            'Removed — extension not in allowlist',
+            f"-{stats['excluded_by_allowlist']}",
+            '—',
+            ext_detail,
+            LIGHT_RED_FILL,
+        ),
+        (
+            'Removed — multi-format deduplication',
+            f"-{stats['multi_format_duplicates']}",
+            '—',
+            'Same base name, different extensions collapsed to 1',
+            LIGHT_RED_FILL,
+        ),
+        (
+            'Files entering comparison',
+            stats['unique_files_for_comparison'],
+            '—',
+            'Actual comparison input',
+            LIGHT_GREEN_FILL,
+        ),
+    ]
+
+    THICK_BOTTOM = Border(
+        left=Side(style='thin', color='D9D9D9'),
+        right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'),
+        bottom=Side(style='medium', color='4472C4'),
+    )
+
+    for i, (metric, count_val, master_val, notes, fill) in enumerate(pipeline_rows):
+        row = sec1_row + 1 + i
+        is_final = (i == len(pipeline_rows) - 1)
+        font = BOLD_FONT if is_final else BODY_FONT
+        border = THICK_BOTTOM if is_final else THIN_BORDER
+
+        for col in range(1, 5):
+            cell = ws_summary.cell(row=row, column=col)
+            cell.font = font
+            cell.border = border
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+            if fill:
+                cell.fill = fill
+
+        ws_summary.cell(row=row, column=1).value = metric
+        ws_summary.cell(row=row, column=2).value = count_val
+        ws_summary.cell(row=row, column=3).value = master_val
+        ws_summary.cell(row=row, column=4).value = notes
+
+    # Blank spacer row
+    spacer_row = sec1_row + len(pipeline_rows) + 1
+    for col in range(1, 5):
+        ws_summary.cell(row=spacer_row, column=col).border = Border()
+
+    # ── Section 2: Comparison Results ───────────────────────────────────
+
+    sec2_row = spacer_row + 1
+    ws_summary.cell(row=sec2_row, column=1, value='COMPARISON RESULTS')
+    ws_summary.merge_cells(start_row=sec2_row, start_column=1, end_row=sec2_row, end_column=4)
+    sec2_cell = ws_summary.cell(row=sec2_row, column=1)
+    sec2_cell.fill = SECTION_FILL
+    sec2_cell.font = Font(bold=True, color='FFFFFF', name='Arial', size=10)
+    sec2_cell.alignment = Alignment(horizontal='left', vertical='center')
+    sec2_cell.border = THIN_BORDER
+
+    unique = stats['unique_files_for_comparison']
+    delta = unique - stats['master_primary_count']
     delta_str = f"{'+' if delta > 0 else ''}{delta}"
-    
-    rows_data = [
-        ('Total files listed', str(stats['total_unique']), str(stats['master_primary_count']), delta_str),
+
+    comparison_rows = [
+        ('Total files compared', str(unique), str(stats['master_primary_count']), delta_str),
         ('Files confirmed present (FOUND)', str(stats['found']), '—', '—'),
         ('Files missing from Master', str(stats['not_found']), '—', 'Action required' if stats['not_found'] > 0 else '—'),
         ('Files under wrong package', str(stats['wrong_package']), '—', 'Review needed' if stats['wrong_package'] > 0 else '—'),
@@ -624,16 +741,15 @@ def generate_report(results, output_path):
         ('Match Rate', f"{stats['match_rate']:.1f}%", '—', ''),
         ('Typos / Anomalies detected', str(stats['flagged']), '—', 'See Detail tab' if stats['flagged'] > 0 else '—'),
         ('Duplicates detected', str(stats['duplicates']), '—', '—'),
-        ('Files excluded (not in allowlist)', str(stats['excluded_count']), '—', '—'),
     ]
-    
-    for idx, (metric, delivery_val, master_val, delta_note) in enumerate(rows_data, 1):
-        row = idx + 1
+
+    for idx, (metric, delivery_val, master_val, delta_note) in enumerate(comparison_rows):
+        row = sec2_row + 1 + idx
         style_body_cell(ws_summary, row, 1, font=BOLD_FONT).value = metric
         style_body_cell(ws_summary, row, 2).value = delivery_val
         style_body_cell(ws_summary, row, 3).value = master_val
         style_body_cell(ws_summary, row, 4).value = delta_note
-        
+
         # Color coding
         if metric == 'Files missing from Master' and stats['not_found'] > 0:
             ws_summary.cell(row=row, column=2).fill = RED_FILL
@@ -653,10 +769,10 @@ def generate_report(results, output_path):
             val = stats['flagged'] if 'Typo' in metric else stats['duplicates']
             if val > 0:
                 ws_summary.cell(row=row, column=2).fill = YELLOW_FILL
-    
+
     ws_summary.freeze_panes = 'A2'
     for col in range(1, 5):
-        ws_summary.column_dimensions[get_column_letter(col)].width = [35, 20, 20, 25][col - 1]
+        ws_summary.column_dimensions[get_column_letter(col)].width = [40, 20, 20, 45][col - 1]
     
     # Move Summary to first position
     wb.move_sheet('Summary', offset=-2)
@@ -682,8 +798,20 @@ def compare_and_report(master_path, delivery_path, output_path, allowlist=None):
     lines = []
     lines.append(f"COMPARISON SUMMARY")
     lines.append(f"{'=' * 50}")
-    lines.append(f"Unique documents in delivery: {stats['total_unique']}")
-    lines.append(f"Match rate: {stats['match_rate']:.1f}%")
+
+    # Pipeline funnel
+    lines.append(f"PROCESSING PIPELINE")
+    lines.append(f"  Raw entries in delivery sheet:     {stats['raw_row_count']}")
+    exc_detail = ''
+    if stats.get('excluded_by_ext'):
+        exc_detail = '  (' + ', '.join(f"{ext}: {cnt}" for ext, cnt in sorted(stats['excluded_by_ext'].items())) + ')'
+    lines.append(f"  Removed — not in allowlist:       -{stats['excluded_by_allowlist']}{exc_detail}")
+    lines.append(f"  Removed — multi-format duplicates: -{stats['multi_format_duplicates']}")
+    lines.append(f"  → Files entering comparison:       {stats['unique_files_for_comparison']}")
+    lines.append(f"")
+
+    lines.append(f"COMPARISON RESULTS")
+    lines.append(f"  Match rate: {stats['match_rate']:.1f}%")
     lines.append(f"")
     
     not_found = [e for e in entries if e.status == 'NOT FOUND']
